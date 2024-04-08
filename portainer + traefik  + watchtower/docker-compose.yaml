@@ -1,0 +1,159 @@
+version: "3.3"
+
+services:
+  # Start Traefik with the latest version
+  traefik:
+   # container_name: traefik
+    image: traefik:v3.0
+    restart: "always"
+    networks:
+      - reverse-proxy
+    command:
+      # Enable Monitoring & Provider Traefik
+      - --api.dashboard=true
+      - --api.insecure=true
+      - --providers.docker=true
+      - --providers.docker.exposedByDefault=false
+      - --providers.file=true
+      # Dynamic Configuration
+      - --providers.file.directory=/etc/traefik
+      - --providers.file.watch=true
+      # Entrypoints
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      # SSL Let's Encrypt & Cloudflare DNS Challenge
+      - --certificatesresolvers.leresolver.acme.email=EXAMPLE@MAIL.LOCAL #Set your email address here, is for the generation of SSL certificates with Let's Encrypt. 
+      - --certificatesresolvers.leresolver.acme.storage=/letsencrypt/acme.json
+      #Certificate Resolver using DNS Challenge
+      - --certificatesresolvers.leresolver.acme.dnschallenge=true
+      - --certificatesresolvers.leresolver.acme.dnschallenge.provider=cloudflare
+      - --certificatesresolvers.leresolver.acme.dnschallenge.resolvers=1.1.1.1:53,1.0.0.1:53
+      #Certificate Resolver using HTTP Challenge
+      - --certificatesresolvers.leresolver.acme.httpchallenge=true
+      - --certificatesresolvers.leresolver.acme.httpchallenge.entrypoint=web
+      #To Skip SSL Verify on server behind Traefik
+      - --serversTransport.insecureSkipVerify=true
+      # logging
+      - --log.filePath=/var/log/traefik/traefik.log
+      - --log.level=ERROR
+    environment:
+      - TZ=Asia/Jakarta
+      # you may choose to use secrets instead of environment variables like this
+      - CF_API_EMAIL=EXAMPLE@MAIL.LOCAL
+      - CF_API_KEY=01HTYR9K006YKKP29X2666GYEJ
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+      - "/etc/traefik/:/etc/traefik/"
+      - "/etc/traefik/letsencrypt:/letsencrypt"
+      - "/var/log/traefik:/var/log/traefik"
+    labels:
+      # Redirect to HTTPS
+      - "traefik.http.routers.http-catchall.rule=hostregexp(`{host:.+}`)"
+      - "traefik.http.routers.http-catchall.entrypoints=web"
+      - "traefik.http.routers.http-catchall.middlewares=redirect-to-https"
+      - "traefik.http.middlewares.redirect-to-https.redirectscheme.scheme=https"
+      # Monitor
+      - "traefik.enable=true"
+      - "traefik.http.routers.monitor-traefik.rule=Host(`monitor.MAIL.LOCAL`)"
+      - "traefik.http.routers.monitor-traefik.entrypoints=websecure"
+      - "traefik.http.services.monitor-traefik.loadbalancer.server.port=8080"
+      - "traefik.http.routers.monitor-traefik.service=monitor-traefik"
+      - "traefik.http.routers.monitor-traefik.tls.certresolver=leresolver"
+      # Password for monitor dashboard default (admin:admin) password is hashed with BCrypt
+      - "traefik.http.routers.monitor-traefik.middlewares=traefik-auth"
+      - "traefik.http.middlewares.traefik-auth.basicauth.users=admin:$2y$10$R/GIqiY77LIQJ1WLwQEeV.rnzZfBzL33LvvAv4J/Ux9mwFYnC0.PK"
+      #WatchTower Update
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  portainer:
+   # container_name: portainer
+    image: portainer/portainer-ee:sts
+    command: -H unix:///var/run/docker.sock
+    restart: always
+    networks:
+      - reverse-proxy
+    environment:
+      - TZ=Asia/Jakarta
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - portainer_data:/data
+    ports:
+      - "9443:9443" #HTTPS Port; HTTP Port use 9000
+      - "8000:8000" #Port for Edge client
+    labels:
+      # Frontend
+      - "traefik.enable=true"
+      - "traefik.http.routers.portainer.rule=Host(`docker.MAIL.LOCAL`)"
+      - "traefik.http.routers.portainer.entrypoints=websecure"
+      - "traefik.http.services.portainer.loadbalancer.server.port=9443"
+      - "traefik.http.services.portainer.loadbalancer.server.scheme=https"
+      - "traefik.http.routers.portainer.service=portainer"
+      - "traefik.http.routers.portainer.tls.certresolver=leresolver"
+
+      # Edge
+      - "traefik.http.routers.edge.rule=Host(`edge.MAIL.LOCAL`)"
+      - "traefik.http.routers.edge.entrypoints=websecure"
+      - "traefik.http.services.edge.loadbalancer.server.port=8000"
+      - "traefik.http.routers.edge.service=edge"
+      - "traefik.http.routers.edge.tls.certresolver=leresolver"
+      #WatchTower Update
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  watchtower:
+    container_name: watchtower
+    image: containrrr/watchtower
+    restart: always
+    networks:
+      - reverse-proxy
+      #  ipv4_address: 192.168.90.4
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - TZ=Asia/Jakarta
+      - WATCHTOWER_CLEANUP=true
+      - WATCHTOWER_LABEL_ENABLE=true
+      - WATCHTOWER_INCLUDE_RESTARTING=true
+      - WATCHTOWER_POLL_INTERVAL=3600 #Fungsinya sama dengan schedule tapi hanya salah satu yang dapat diaktifkan, jangan keduanya
+      #- WATCHTOWER_SCHEDULE=0 0 * * * * #Gunakan 6 Field Cron Syntax
+    labels:
+      - com.centurylinklabs.watchtower.enable=true
+
+  cloudflare-companion:
+    image: tiredofit/traefik-cloudflare-companion
+    container_name: cloudflare-companion
+    restart: unless-stopped
+    networks:
+      - reverse-proxy
+    depends_on:
+      - traefik
+    volumes:
+      - /var/cloudflare-companion/logs:/logs
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - TIMEZONE=Asia/Jakarta
+      - LOG_TYPE=BOTH
+      - LOG_LEVEL=DEBUG
+      - TRAEFIK_VERSION=2
+      - CF_EMAIL=EXAMPLE@MAIL.LOCAL
+      - CF_TOKEN=01HTYR9K006YKKP29X2666GYEJ
+      - TARGET_DOMAIN=192.168.1.1 #IP or Domain of Your Server
+      - DOMAIN1=MAIL.LOCAL
+      - DOMAIN1_ZONE_ID=01HTYR9K006YKKP29X2666GYEJ
+      - DOMAIN1_PROXIED=TRUE
+      - REFRESH_ENTRIES=TRUE
+      - RC_TYPE=A
+
+
+
+volumes:
+  portainer_data:
+
+networks:
+  reverse-proxy:
+    ipam:
+      driver: default
+      config:
+        - subnet: "192.168.90.0/24"
